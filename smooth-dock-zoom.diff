@@ -1,0 +1,213 @@
+23:07:09 ~/tmp/dash-to-dock 0 $ git diff  origin/master | cat -
+diff --git a/appIcons.js b/appIcons.js
+index 7e4a0f4..0b68f28 100644
+--- a/appIcons.js
++++ b/appIcons.js
+@@ -273,7 +273,7 @@ var MyAppIcon = class DashToDock_AppIcon extends Dash.DashIcon {
+     }
+ 
+     /**
+-     * Update taraget for minimization animation
++     * Update target for minimization animation
+      */
+     updateIconGeometry() {
+         // If (for unknown reason) the actor is not on the stage the reported size
+diff --git a/dash.js b/dash.js
+index 07f6c61..a1cbf53 100644
+--- a/dash.js
++++ b/dash.js
+@@ -39,6 +39,27 @@ const DASH_ITEM_HOVER_TIMEOUT = Dash.DASH_ITEM_HOVER_TIMEOUT;
+ let MyDashItemContainer = GObject.registerClass(
+ class DashToDock_MyDashItemContainer extends Dash.DashItemContainer {
+ 
++    _init() {
++        super._init();
++        switch (Utils.getPosition()) {
++        case St.Side.LEFT:
++            this.x_align = Clutter.ActorAlign.START;
++            //this.y_align = Clutter.ActorAlign.FILL;
++            //this.y_align = Clutter.ActorAlign.FILL;
++            //this.y_expand = true;
++            break;
++        case St.Side.RIGHT:
++            this.x_align = Clutter.ActorAlign.END;
++            break;
++        case St.Side.TOP:
++            this.y_align = Clutter.ActorAlign.START;
++            break;
++        case St.Side.BOTTOM:
++            this.y_align = Clutter.ActorAlign.END;
++            break;
++        }
++    }
++
+     showLabel() {
+         return AppIcons.itemShowLabel.call(this);
+     }
+@@ -150,6 +171,7 @@ class DashToDock_MyDashActor extends St.Widget {
+         let [, showAppsButton] = this.get_children();
+         let [minHeight, ] = showAppsButton.get_preferred_height(forWidth);
+ 
++        // NOTE(rodolf0): this is used for setting container
+         return [minHeight, natHeight];
+     }
+ });
+@@ -211,11 +233,17 @@ var MyDash = GObject.registerClass({
+ 
+         this._scrollView.connect('scroll-event', this._onScrollEvent.bind(this));
+ 
++
++        // TODO:
++      // on zoom: expand height and width to a fixed number
++      // move vertically whole window to compensate mouse
++
++        // NOTE(rodolf0): this one's needed (FILL)
+         this._box = new St.BoxLayout({
+             vertical: !this._isHorizontal,
+             clip_to_allocation: false,
+             x_align: Clutter.ActorAlign.START,
+-            y_align: Clutter.ActorAlign.START
++            y_align: Clutter.ActorAlign.FILL,
+         });
+         this._box._delegate = this;
+         this._container.add_actor(this._scrollView);
+@@ -436,7 +464,6 @@ var MyDash = GObject.registerClass({
+                                              this._monitorIndex,
+                                              { setSizeManually: true,
+                                                showLabel: false });
+-
+         if (appIcon._draggable) {
+             appIcon._draggable.connect('drag-begin', () => {
+                 appIcon.actor.opacity = 50;
+@@ -588,7 +615,39 @@ var MyDash = GObject.registerClass({
+         }
+     }
+ 
+-    _adjustIconSize() {
++    _zoomIcons(hover) {
++        let buttons = this._box.get_children().filter(function(actor) {
++            return actor.child &&
++                   actor.child._delegate &&
++                   actor.child._delegate.icon &&
++                   !actor.animatingOut;
++        });
++
++        let lm = this._box.get_layout_manager();
++        //log(`homo=${lm.homogeneous} spacing=${lmkspacing}`);
++        //lm.spacing = 20;
++        //lm.homogeneous = true;
++
++        let [mouse_x, mouse_y, mask] = global.get_pointer();
++        for (let i = 0; i < buttons.length; i++) {
++            let scale_factor = 1.0;
++            let button = buttons[i]; //.child._delegate.icon;
++            if (hover) {
++                let [ix, iy] = button.get_transformed_position();
++                let [ih_, ih] = button.get_preferred_height(-1);
++                let [iw_, iw] = button.get_preferred_width(-1);
++                let c = this._isHorizontal ?
++                  Math.abs(ix + iw/2.0 - mouse_x):
++                  Math.abs(iy + ih/2.0 - mouse_y);
++                scale_factor = Math.max(2.0 - 0.00003 * c * c, 1.0);
++                //log(`scale_factor=${scale_factor}, ${mouse_y}, ${iy}, ${ih}`);
++            }
++            button.set_pivot_point(0.0, 0.0);
++            button.set_scale(scale_factor, scale_factor);
++        }
++    }
++
++    _adjustIconSize(isZoomed) {
+         // For the icon size, we only consider children which are "proper"
+         // icons (i.e. ignoring drag placeholders) and which are not
+         // animating out (which means they will be destroyed at the end of
+@@ -864,7 +923,7 @@ var MyDash = GObject.registerClass({
+                 item.destroy();
+         }
+ 
+-        this._adjustIconSize();
++        this._adjustIconSize(false);
+ 
+         // Skip animations on first run when adding the initial set
+         // of items, to avoid all items zooming in at once
+diff --git a/docking.js b/docking.js
+index 9a6cf8c..487149d 100644
+--- a/docking.js
++++ b/docking.js
+@@ -249,6 +249,7 @@ var DockedDash = GObject.registerClass({
+             track_hover: true
+         });
+         this._box.connect('notify::hover', this._hoverChanged.bind(this));
++        this._box.connect('motion-event', this._mouseMove.bind(this));
+ 
+         // Create and apply height constraint to the dash. It's controlled by this.height
+         this.constrainSize = new Clutter.BindConstraint({
+@@ -649,6 +650,57 @@ var DockedDash = GObject.registerClass({
+     }
+ 
+     _hoverChanged() {
++        // rodolf0
++        if (!this._box.hover) {
++            // zoom out
++            this.dash._zoomIcons(false);
++            this.dash._adjustIconSize(false);
++
++            let [w, h] = this._orig_container_size;
++            //log(`Restoring dims ${w}x${h}`);
++            if (this._isHorizontal) {
++                this.dash._container.height = h;
++            } else {
++                this.dash._container.width = w;
++            }
++        } else {
++            // Store size pre-change
++            this._orig_container_size = [
++                this.dash._container.width,
++                this.dash._container.height,
++            ];
++
++            let zoomf = 2.0;
++            let a = 0.00003;
++
++            let buttons = this.dash._box.get_children().filter(function(actor) {
++                return actor.child &&
++                       actor.child._delegate &&
++                       actor.child._delegate.icon &&
++                       !actor.animatingOut;
++            });
++
++            let b = buttons[0].child;
++
++            let [iw_, iw] = b.get_preferred_width(-1);
++            let [ih_, ih] = b.get_preferred_height(-1);
++
++            if (this._isHorizontal) {
++                this.dash._container.height += ih * (zoomf - 1.0);
++            } else {
++                this.dash._container.width += iw * (zoomf - 1.0);
++            }
++
++            //let r0 = Math.sqrt((zoomf-1.0)/a);
++            //let h0 = Math.max(0.0, this.dash._container.height /2.0 - r0);
++            //let h1 = (zoomf - 1.0) * r0 - a * r0*r0*r0 / 3.0;
++            //this.dash._container.height *= h1;
++
++            //log(`Setting dims ${this.dash._container.width}x${this.dash._container.height}`);
++
++            //this.dash._adjustIconSize(true);
++        }
++
+         if (!this._ignoreHover) {
+             // Skip if dock is not in autohide mode for instance because it is shown
+             // by intellihide.
+@@ -661,6 +713,11 @@ var DockedDash = GObject.registerClass({
+         }
+     }
+ 
++    _mouseMove() {
++      // Just call this once rodolf0 .. TODO: move this to size-change?
++      this.dash._zoomIcons(true);
++    }
++
+     getDockState() {
+         return this._dockState;
+     }
